@@ -28,6 +28,7 @@ type receiver struct {
 	lastACKSequenceNumber       circular.Number
 	lastDeliveredSequenceNumber circular.Number
 	packetList                  *list.List
+	lastACKPacket               *list.Element
 	lock                        sync.RWMutex
 
 	nPackets uint
@@ -266,49 +267,40 @@ func (r *receiver) periodicACK(now uint64) (ok bool, sequenceNumber circular.Num
 
 	minPktTsbpdTime, maxPktTsbpdTime := uint64(0), uint64(0)
 
-	ackSequenceNumber := r.lastDeliveredSequenceNumber
-
 	// Find the sequence number up until we have all in a row.
 	// Where the first gap is (or at the end of the list) is where we can ACK to.
+	// If there are packets that should be delivered by now, move foward.
+	ackSequenceNumber := r.lastACKSequenceNumber
+	if r.packetList.Len() > 0 {
+		frontElement := r.packetList.Front()
+		frontPacket := frontElement.Value.(packet.Packet)
 
-	e := r.packetList.Front()
-	if e != nil {
-		p := e.Value.(packet.Packet)
+		minPktTsbpdTime = frontPacket.Header().PktTsbpdTime
+		maxPktTsbpdTime = frontPacket.Header().PktTsbpdTime
 
-		minPktTsbpdTime = p.Header().PktTsbpdTime
-		maxPktTsbpdTime = p.Header().PktTsbpdTime
-
-		// If there are packets that should be delivered by now, move foward.
-		if p.Header().PktTsbpdTime <= now {
-			for e = e.Next(); e != nil; e = e.Next() {
-				p = e.Value.(packet.Packet)
-
-				if p.Header().PktTsbpdTime > now {
-					break
-				}
-			}
-
-			ackSequenceNumber = p.Header().PacketSequenceNumber
-			maxPktTsbpdTime = p.Header().PktTsbpdTime
-
-			if e != nil {
-				if e = e.Next(); e != nil {
-					p = e.Value.(packet.Packet)
-				}
-			}
+		var startElement *list.Element
+		if r.lastACKPacket != nil {
+			startElement = r.lastACKPacket.Next()
+		}
+		if startElement == nil {
+			startElement = frontElement
 		}
 
-		if p.Header().PacketSequenceNumber.Equals(ackSequenceNumber.Inc()) {
-			ackSequenceNumber = p.Header().PacketSequenceNumber
-
-			for e = e.Next(); e != nil; e = e.Next() {
-				p = e.Value.(packet.Packet)
-				if !p.Header().PacketSequenceNumber.Equals(ackSequenceNumber.Inc()) {
-					break
-				}
-
-				ackSequenceNumber = p.Header().PacketSequenceNumber
+		for e := startElement; e != nil; e = e.Next() {
+			p := e.Value.(packet.Packet)
+			if p.Header().PktTsbpdTime > maxPktTsbpdTime {
 				maxPktTsbpdTime = p.Header().PktTsbpdTime
+			}
+			if p.Header().PktTsbpdTime < minPktTsbpdTime || minPktTsbpdTime == 0 {
+				minPktTsbpdTime = p.Header().PktTsbpdTime
+			}
+
+			if p.Header().PktTsbpdTime <= now ||
+				p.Header().PacketSequenceNumber.Equals(ackSequenceNumber.Inc()) {
+				r.lastACKPacket = e
+				ackSequenceNumber = p.Header().PacketSequenceNumber
+			} else {
+				break
 			}
 		}
 
